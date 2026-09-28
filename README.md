@@ -44,15 +44,15 @@ Tested against all 229 `ROOMS/*.CAM` files of the retail CD:
 
 | Result | Files |
 | --- | --- |
-| Complete 320x200 background, no unrecovered pixels | 198 |
-| Complete apart from a handful of pixels (3-64) at row ends | 11 |
+| Complete 320x200 background, no unrecovered pixels | 195 |
+| Complete apart from a few pixels (2-757) that live in an animation layer | 14 |
 | No room background in the file (character / effect / dialogue-portrait files, `DEMO1`) | 20 |
 
 Accuracy: `CE31` is verified pixel-exact against a frame captured from the running game (apart
 from the composited 3D characters). It has no sprites, so it only tests the base image and the
 token grammar. For the other rooms I checked the results by eye; the images are seamless, which
 strongly suggests the layout below is right, but only one room was checked against ground truth.
-Two details are heuristics, see [Known gaps](#known-gaps).
+Some details are heuristics, see [Known gaps](#known-gaps).
 
 ## Format
 
@@ -107,6 +107,12 @@ to exactly `w` columns; a row of one byte is empty.
 the columns nobody covers from the base row, left to right. The base row holds about one extra
 pixel at each edge of every covered stretch (an antialiasing fringe), which is skipped.
 
+**Short base rows.** In some rows the base is shorter than the sprites leave room for: the
+missing pixels belong to an animated element stored in an animation chunk. The decoder inserts a
+gap of the right size where the row lines up best with the row above (the tail of the row would
+otherwise shift left) and copies the row above into it, so the picture stays aligned and only a few
+pixels are approximated. Rows that share a tail with another row are read past their nominal end.
+
 **Animation chunks** start with the 320x200 marker instead: a list of frames
 (`uint32 offset, uint16 size` per frame), each `flag w h x y`, a row table and span rows. They are
 door openings, blinking lights and the like, and are only dumped with `--frames`, not composited.
@@ -127,6 +133,7 @@ and then from checking candidate layouts by looking at the seams.
 - The 20 non-room files have no background at all; their pictures are animation frames
   (`--frames`).
 - `00 81 vv` tokens are ignored.
+- Pixels that belong to animation frames are approximated from the row above (a few per row in about a dozen rooms).
 - Depth-sorting between overlapping sprites is by the directory `depth` (nearest wins).
 - The data is 8-bit indexed. Some rooms are drawn with a palette that the game alters at run
   time (fades, lighting); this tool uses the palette stored in the file.

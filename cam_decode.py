@@ -165,56 +165,122 @@ def sprites(d):
 
 # ---------------------------------------------------------------- assembly
 
-def assemble_rows(base, sprs):
+def _assemble_row(y, base_row, sprs, lum, prev):
+    """One row of the reassembled image (see assemble_rows). `prev` is the row above."""
+    b, b_long = base_row
+    act = []
+    for s in sprs:
+        k = y - s['y0']
+        if 0 <= k < s['h'] and s['rows'][k]:
+            act.append((s, s['rows'][k]))
+    act.sort(key=lambda t: -t[0]['depth'])              # far first, near painted last
+    out = [None] * W
+    cov = [False] * W
+    for s, spans in act:
+        for col, px in spans:
+            for k, v in enumerate(px):
+                x = s['x0'] + col + k
+                if 0 <= x < W:
+                    out[x] = v; cov[x] = True
+    slots = []                                           # covered stretches: [a, b)
+    x = 0
+    while x < W:
+        if cov[x]:
+            a = x
+            while x < W and cov[x]:
+                x += 1
+            slots += [a, x - 1] if x - a > 1 else [a]
+        else:
+            x += 1
+
+    def fill(src, extra):
+        skip = set(slots[:max(0, extra)])
+        row = list(out)
+        bi = 0
+        for x in range(W):
+            if not cov[x]:
+                if bi < len(src):
+                    row[x] = src[bi]; bi += 1
+            elif x in skip:
+                bi += 1
+        return row
+
+    unc = W - sum(cov)
+    if len(b) >= unc:
+        return fill(b, len(b) - unc)
+    # The base row is short: some pixels live in a layer we do not have (an animated element).
+    # Insert the gap where the row lines up best with the one above, and copy the row above
+    # into it.
+    f = (lambda v: lum[v]) if lum else (lambda v: v)
+    cols = [x for x in range(W) if not cov[x]]
+    skipped_cols = {}
+    best = None
+    for extra in sorted({0, len(slots) // 2, len(slots)}):
+        m = max(0, unc + extra - len(b))
+        skip = set(slots[:extra])
+        # base index of the j-th uncovered column when there is no gap: j + skips before it
+        s_before = []
+        n_skip = 0
+        ci = 0
+        for x in range(W):
+            if cov[x]:
+                if x in skip:
+                    n_skip += 1
+            else:
+                s_before.append(n_skip)
+        n = len(cols)
+
+        def c(j, shift):
+            i = j + s_before[j] - shift
+            if prev is None or not (0 <= i < len(b)) or prev[cols[j]] is None:
+                return 0
+            return abs(f(b[i]) - f(prev[cols[j]]))
+        pre = [0] * (n + 1)
+        for j in range(n):
+            pre[j + 1] = pre[j] + c(j, 0)
+        suf = [0] * (n + 2)
+        for j in range(n - 1, -1, -1):
+            suf[j] = suf[j + 1] + c(j, m)
+        for g in range(0, n - m + 1):
+            cost = pre[g] + suf[min(n, g + m)]
+            if best is None or cost < best[0]:
+                best = (cost, extra, m, g, s_before)
+        if prev is None:
+            break
+    cost, extra, m, g, s_before = best
+    cost += 40 * m                                       # inventing pixels is not free
+    if prev is not None and len(b_long) >= unc:
+        for e in sorted({0, len(slots) // 2, len(slots)}):
+            cand = fill(b_long, e)
+            cc = sum(abs(f(p) - f(q)) for p, q in zip(prev, cand) if p is not None and q is not None)
+            if cc < cost:
+                return cand
+    row = list(out)
+    for j, x in enumerate(cols):
+        if g <= j < g + m:
+            row[x] = prev[x] if (prev is not None and m <= 100) else None   # big gap: not ours to invent
+            continue
+        i = j + s_before[j] - (m if j >= g + m else 0)
+        if 0 <= i < len(b):
+            row[x] = b[i]
+    return row
+
+
+def assemble_rows(base, sprs, lum=None):
     """Reassemble the full 320x200 image. Returns 200 rows of 320 entries (palette index,
     or None where nothing could be recovered).
 
     Model. Sprites are cut-outs of the picture. Each one draws its spans at exact columns
     (x0 + span column); nearer sprites (smaller depth) draw over farther ones. The base row
     stores only the pixels that no sprite covers, left to right, plus about one extra pixel
-    at each edge of every covered stretch (antialiasing fringe) which is skipped."""
+    at each edge of every covered stretch (antialiasing fringe) which is skipped.
+
+    When a base row shares its tail with another one its true length is unknown; the number
+    of skipped fringe pixels is then chosen so the row best matches the one above it
+    (`lum` maps palette index -> brightness)."""
     grid = []
     for y in range(H):
-        b, b_long = base[y]
-        act = []
-        for s in sprs:
-            k = y - s['y0']
-            if 0 <= k < s['h'] and s['rows'][k]:
-                act.append((s, s['rows'][k]))
-        act.sort(key=lambda t: -t[0]['depth'])          # far first, near painted last
-        out = [None] * W
-        cov = [False] * W
-        for s, spans in act:
-            for col, px in spans:
-                for k, v in enumerate(px):
-                    x = s['x0'] + col + k
-                    if 0 <= x < W:
-                        out[x] = v; cov[x] = True
-        slots = []                                       # covered stretches: [a, b)
-        x = 0
-        while x < W:
-            if cov[x]:
-                a = x
-                while x < W and cov[x]:
-                    x += 1
-                slots += [a, x - 1] if x - a > 1 else [a]
-            else:
-                x += 1
-        unc = W - sum(cov)
-        if len(b) < unc:                                 # row shares its tail: use the longer read
-            b = b_long
-            extra = len(slots)
-        else:
-            extra = len(b) - unc
-        skip = set(slots[:max(0, extra)])
-        bi = 0
-        for x in range(W):
-            if not cov[x]:
-                if bi < len(b):
-                    out[x] = b[bi]; bi += 1
-            elif x in skip:
-                bi += 1
-        grid.append(out)
+        grid.append(_assemble_row(y, base[y], sprs, lum, grid[-1] if grid else None))
     return grid
 
 
@@ -266,14 +332,77 @@ def frame_image(fr, pal):
     return im
 
 
+def _deficit(base, sprs):
+    """Total number of pixels by which the base rows are shorter than the columns left
+    uncovered by the sprites (0 when the sprite set explains the base image)."""
+    tot = 0
+    for y in range(H):
+        cov = 0
+        seen = [False] * W
+        for s in sprs:
+            k = y - s['y0']
+            if 0 <= k < s['h'] and s['rows'][k]:
+                for col, px in s['rows'][k]:
+                    for j in range(len(px)):
+                        x = s['x0'] + col + j
+                        if 0 <= x < W and not seen[x]:
+                            seen[x] = True; cov += 1
+        unc = W - cov
+        b, b_long = base[y]
+        tot += max(0, unc - len(b))
+    return tot
+
+
+def _roughness(rows, lum):
+    t = n = 0
+    for y in range(1, len(rows)):
+        for p, q in zip(rows[y - 1], rows[y]):
+            if p is not None and q is not None:
+                t += abs(lum[p] - lum[q]); n += 1
+    return t / max(n, 1)
+
+
+def _explain_with_frames(d, base, sprs, lum):
+    """Some rooms keep part of the picture in the first frame of an animation chunk (a panel
+    that can flicker, a door that can open). If adding such a frame explains the base rows
+    better (fewer pixels short), add it as a sprite. Its header position is not reliable, so
+    the column is chosen where the picture is smoothest."""
+    best = _deficit(base, sprs)
+    seen = set()
+    while best > 0:
+        pick = None
+        for fr in frames(d):
+            if fr['chunk'] in seen or fr['index'] != 0:
+                continue
+            cand = dict(name='@' + fr['chunk'], depth=99999, x0=W - fr['w'], y0=fr['y0'], w=fr['w'], h=fr['h'], rows=fr['rows'])
+            dfc = _deficit(base, sprs + [cand])
+            if dfc < best - 20 and (pick is None or dfc < pick[0]):
+                pick = (dfc, cand, fr['chunk'])
+        if not pick:
+            break
+        dfc, cand, chunk = pick
+        y0, y1 = max(0, cand['y0'] - 1), min(H, cand['y0'] + cand['h'])
+        scored = []
+        for x0 in range(0, W - cand['w'] + 1):
+            trial = dict(cand, x0=x0)
+            rows = []
+            for y in range(y0, y1):
+                rows.append(_assemble_row(y, base[y], sprs + [trial], lum, rows[-1] if rows else None))
+            scored.append((_roughness(rows, lum), x0))
+        cand['x0'] = min(scored)[1]
+        sprs = sprs + [cand]; seen.add(chunk); best = dfc
+    return sprs
+
+
 def decode_file(path, palette=None):
     """Returns dict(pixels=200 rows of 320 (index|None), palette, missing, sprites, embedded)."""
     with open(path, 'rb') as f:
         d = f.read()
     sp = sprites(d)
-    grid = assemble_rows(base_rows(d), sp)
+    base = base_rows(d)
     emb = None if palette else read_palette(d)
     pal = palette or emb or [(i, i, i) for i in range(256)]
+    grid = assemble_rows(base, sp, [sum(c) for c in pal])
     missing = sum(v is None for row in grid for v in row)
     return dict(pixels=grid, palette=pal, missing=missing, sprites=[s['name'] for s in sp],
                 embedded=emb is not None)
